@@ -92,6 +92,8 @@ fn setup_app(n: usize, expanded_len: usize, detail_mode: bool) -> App {
 		agent_type: "general-purpose".to_string(),
 		output_path: PathBuf::from("/tmp/nonexistent-bench"),
 		updated_at: Utc::now(),
+		workflow_run: None,
+		workflow_label: None,
 	}];
 	app.agent_type_by_id
 		.insert("a1".to_string(), "general-purpose".to_string());

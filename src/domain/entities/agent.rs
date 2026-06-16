@@ -26,6 +26,20 @@ pub struct AgentEntity {
 
 	/// ファイルの mtime。
 	pub updated_at: DateTime<Utc>,
+
+	/// Workflow ツール経由の agent のとき、その run id (`wf_` プレフィックスを
+	/// 除いたもの)。通常のサブエージェントは `None`。
+	///
+	/// `subagents/workflows/<wf_runId>/agent-*.jsonl` から検出された agent に
+	/// だけ立つ。UI 層はこれで 🧩 アイコン / `wf:<run>` マーカーを分岐する。
+	#[serde(default)]
+	pub workflow_run: Option<String>,
+
+	/// generic な `workflow-subagent` について、先頭 prompt から導出した短い
+	/// ロール label (例: `code-review の finder`)。カスタム型 (型名がそのまま
+	/// label になる) や通常 agent では `None`。
+	#[serde(default)]
+	pub workflow_label: Option<String>,
 }
 
 /// `agent_id` → `agent_type` のマッピング情報。

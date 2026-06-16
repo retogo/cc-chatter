@@ -12,6 +12,15 @@
 - **UI 層は外部 literal を直接判定しない**
   `stop_reason == "end_turn"` のような判定は Mapper で `is_final_response: bool`
   に bool 化してから UI に渡す。スキーマ変更が UI まで伝播するのを防ぐ。
+- **Workflow agent は `subagents/workflows/<wf_runId>/` に 1 階層深く出る**
+  Workflow ツールの `agent()` が吐くログは通常の `subagents/agent-*.jsonl` では
+  なく nested。`get_sub_agents` / `count_subagents` を 1 階層 walk して統合し、
+  meta は各 agent の自ディレクトリ基準で解決する。main_watcher は再帰監視に
+  切り替えて nested の新規追加を検知する (NonRecursive だと取りこぼす)。
+- **`agent()` の label は永続化されない → prompt 先頭から導出**
+  `journal.jsonl` は agentId とハッシュ key の対応しか持たず、`review:bugs` の
+  ような人間可読 label は残らない。generic な `workflow-subagent` は先頭 prompt
+  行から短いロール label を導出して代替する (カスタム型はそのまま型名を使う)。
 
 ## TUI スクロールと選択
 

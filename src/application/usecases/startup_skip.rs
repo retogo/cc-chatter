@@ -177,6 +177,8 @@ mod tests {
 			agent_type: "Explore".to_string(),
 			output_path: PathBuf::from(format!("/tmp/agent-{id}.jsonl")),
 			updated_at: Utc::now(),
+			workflow_run: None,
+			workflow_label: None,
 		}
 	}
 

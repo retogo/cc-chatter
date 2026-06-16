@@ -947,6 +947,8 @@ mod tests {
 			agent_type: "general-purpose".to_string(),
 			output_path: PathBuf::from(format!("/tmp/agent-{id}.jsonl")),
 			updated_at: Utc::now(),
+			workflow_run: None,
+			workflow_label: None,
 		}
 	}
 
@@ -1101,6 +1103,8 @@ mod tests {
 			agent_type: "general-purpose".into(),
 			output_path: PathBuf::from("/tmp/a.jsonl"),
 			updated_at: Utc::now(),
+			workflow_run: None,
+			workflow_label: None,
 		};
 		app.update(Msg::AgentsLoaded {
 			session_id: "s1".into(),
@@ -1120,6 +1124,8 @@ mod tests {
 			agent_type: "Explore".into(),
 			output_path: PathBuf::from("/tmp/a.jsonl"),
 			updated_at: Utc::now(),
+			workflow_run: None,
+			workflow_label: None,
 		};
 		app.update(Msg::AgentsLoaded {
 			session_id: "s1".into(),
@@ -1141,6 +1147,8 @@ mod tests {
 			agent_type: "general-purpose".into(),
 			output_path: PathBuf::from("/tmp/agent-a-new.jsonl"),
 			updated_at: Utc::now(),
+			workflow_run: None,
+			workflow_label: None,
 		};
 		app.update(Msg::NewAgentAppeared { agent });
 		assert_eq!(
@@ -1180,6 +1188,8 @@ mod tests {
 			agent_type: "Explore".into(),
 			output_path: PathBuf::from("/tmp/agent-a-new.jsonl"),
 			updated_at: Utc::now(),
+			workflow_run: None,
+			workflow_label: None,
 		};
 		let cmds = app.update(Msg::NewAgentAppeared { agent });
 		assert_eq!(app.view.current_view, AppView::Watching);

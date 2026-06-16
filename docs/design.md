@@ -2,17 +2,17 @@
 
 ## 技術スタック
 
-| ライブラリ | 用途 |
-|------------|------|
-| ratatui | TUI レンダリング (immediate mode) |
-| crossterm | キー/マウス/画面操作 (EventStream + raw mode) |
-| tokio | 非同期ランタイム / event loop |
-| notify | ファイル監視 |
-| clap (derive) | CLI 引数 |
-| serde / serde_json | JSONL パース |
-| chrono | タイムスタンプ |
-| tracing | 構造化ログ (`RUST_LOG` でファイル出力) |
-| color-eyre / signal-hook | panic / signal 時の端末復旧 |
+| ライブラリ               | 用途                                          |
+| ------------------------ | --------------------------------------------- |
+| ratatui                  | TUI レンダリング (immediate mode)             |
+| crossterm                | キー/マウス/画面操作 (EventStream + raw mode) |
+| tokio                    | 非同期ランタイム / event loop                 |
+| notify                   | ファイル監視                                  |
+| clap (derive)            | CLI 引数                                      |
+| serde / serde_json       | JSONL パース                                  |
+| chrono                   | タイムスタンプ                                |
+| tracing                  | 構造化ログ (`RUST_LOG` でファイル出力)        |
+| color-eyre / signal-hook | panic / signal 時の端末復旧                   |
 
 ## アーキテクチャ
 
@@ -120,8 +120,17 @@ src/
 ├── {sessionId}.jsonl                    ← メインエージェントの会話ログ
 └── {sessionId}/subagents/
     ├── agent-{agentId}.jsonl            ← サブエージェントの会話ログ（実体）
-    └── agent-{agentId}.meta.json        ← agent_type / description のサイドカー
+    ├── agent-{agentId}.meta.json        ← agent_type / description のサイドカー
+    └── workflows/{wf_runId}/            ← Workflow ツール経由の agent (1 階層深い)
+        ├── agent-{agentId}.jsonl        ← フォーマットは通常 subagent と同一
+        ├── agent-{agentId}.meta.json    ← {"agentType":"workflow-subagent"} 等
+        └── journal.jsonl                ← run の started/result イベント (未使用)
 ```
+
+Workflow agent の `agent-*.jsonl` / `.meta.json` は通常のサブエージェントと同じ
+フォーマット。違いは **`subagents/workflows/<wf_runId>/` という 1 階層深いパス**
+だけ。`journal.jsonl` は agentId とハッシュ key の対応のみで、`agent()` に渡した
+人間可読な label は持たない (cc-chatter は使用しない)。
 
 ## 各層の詳細
 
@@ -162,8 +171,22 @@ src/
   - `FileSystemSessionRepository::get_sub_agents` はまずサイドカーを読み、
     取れなかった agent だけメインログ経由の `AgentMapperImpl` にフォールバックする
     （古いログ互換のため mapper ルートは残す）
+  - サイドカーは各 agent の **自ディレクトリ基準**で解決する
+    (`<agent_dir>/agent-<id>.meta.json`)。通常 agent は `subagents/`、
+    workflow agent は `subagents/workflows/<wf_runId>/` が自ディレクトリ
+- **Workflow agent の検出** (`get_sub_agents` / `count_subagents`)
+  - `subagents/` 直下の `agent-*.jsonl` に加え、`subagents/workflows/<wf_runId>/`
+    配下の `agent-*.jsonl` も **1 階層 walk** して同じフラットなリストに統合する
+  - workflow agent には `AgentEntity.workflow_run = Some(<run_id>)` を立てる
+    (通常 agent は `None`)。UI はこれで 🧩 / `wf:<run>` マーカーを分岐する
+  - `agent_type == "workflow-subagent"` の generic な agent については、
+    先頭 prompt 行から短いロール label を導出して `AgentEntity.workflow_label`
+    に入れる (`derive_workflow_label`)。カスタム型 (consistency-reviewer 等) は
+    型名がそのまま label になるので `workflow_label = None`
 - **main_watcher / sub_agent_watcher**: notify ベース。watcher スレッド内で
-  `Msg` を channel に流し、event_loop で `tokio::select!` に畳み込む
+  `Msg` を channel に流し、event_loop で `tokio::select!` に畳み込む。
+  main_watcher は subagents ディレクトリを **再帰監視** (`RecursiveMode::Recursive`)
+  し、`subagents/workflows/<wf_runId>/` に新規追加される workflow agent も検出する
 - **TerminalGuard (`infrastructure/input/terminal_guard.rs`)**: raw mode と SGR
   mouse reporting (`\x1b[?1002h\x1b[?1006h`) を `new()` で有効化し、`Drop` で
   必ず解除する RAII ラッパー。さらに `install_panic_hook` と

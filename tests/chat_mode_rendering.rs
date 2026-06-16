@@ -33,6 +33,8 @@ fn setup_app_with_mode(chat_mode: ChatMode) -> App {
 		agent_type: "general-purpose".to_string(),
 		output_path: PathBuf::from("/tmp/nonexistent"),
 		updated_at: Utc::now(),
+		workflow_run: None,
+		workflow_label: None,
 	}];
 	app.agent_type_by_id
 		.insert("a1".to_string(), "general-purpose".to_string());
@@ -178,6 +180,8 @@ fn slack_mode_uses_full_area_width() {
 		agent_type: "general-purpose".to_string(),
 		output_path: PathBuf::from("/tmp/nonexistent"),
 		updated_at: Utc::now(),
+		workflow_run: None,
+		workflow_label: None,
 	}];
 	app.agent_type_by_id
 		.insert("a1".to_string(), "general-purpose".to_string());
@@ -237,6 +241,8 @@ fn line_mode_has_no_stray_vertical_bar_below_bottom_border_for_integrated_bubble
 		agent_type: "general-purpose".to_string(),
 		output_path: PathBuf::from("/tmp/nonexistent"),
 		updated_at: Utc::now(),
+		workflow_run: None,
+		workflow_label: None,
 	}];
 	app.agent_type_by_id
 		.insert("a1".to_string(), "general-purpose".to_string());
@@ -398,6 +404,8 @@ fn line_mode_bubble_corners_and_bars(sender: Sender, area_cols: u16) -> LineMode
 		agent_type: "general-purpose".to_string(),
 		output_path: PathBuf::from("/tmp/nonexistent"),
 		updated_at: Utc::now(),
+		workflow_run: None,
+		workflow_label: None,
 	}];
 	app.agent_type_by_id
 		.insert("a1".to_string(), "general-purpose".to_string());
@@ -564,6 +572,8 @@ fn line_mode_right_border_aligns_for_integrated_bubble() {
 			agent_type: "general-purpose".to_string(),
 			output_path: PathBuf::from("/tmp/x"),
 			updated_at: Utc::now(),
+			workflow_run: None,
+			workflow_label: None,
 		}];
 		app.agent_type_by_id
 			.insert("a1".to_string(), "general-purpose".to_string());
@@ -640,6 +650,8 @@ mod inflight_aggregation {
 			agent_type: "general-purpose".to_string(),
 			output_path: PathBuf::from("/tmp/nonexistent"),
 			updated_at: Utc::now(),
+			workflow_run: None,
+			workflow_label: None,
 		}];
 		app.agent_type_by_id
 			.insert("a1".to_string(), "general-purpose".to_string());

@@ -104,7 +104,9 @@ fn run_main_watch_loop(
 	} else {
 		subagents_dir.clone()
 	};
-	if let Err(err) = watcher.watch(&watch_target, RecursiveMode::NonRecursive) {
+	// Recursive にして subagents/workflows/<wf_runId>/ に追加される Workflow ツール
+	// 経由の agent も検出する (NonRecursive だと 1 階層下の新規作成を取りこぼす)
+	if let Err(err) = watcher.watch(&watch_target, RecursiveMode::Recursive) {
 		let _ = tx.send(Msg::Error(format!(
 			"MainWatcher.watch failed for {}: {err}",
 			watch_target.display()

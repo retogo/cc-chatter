@@ -13,6 +13,7 @@ pub fn get_agent_icon(agent_type: &str) -> &'static str {
 		"Bash" => "💻",
 		"claude-code-guide" => "📚",
 		"statusline-setup" => "⚙️",
+		"workflow-subagent" => "🧩",
 		_ => "🔸",
 	}
 }
@@ -34,5 +35,10 @@ mod tests {
 		assert_eq!(get_agent_icon("unknown"), "🔸");
 		assert_eq!(get_agent_icon(""), "🔸");
 		assert_eq!(get_agent_icon("SomeCustomType"), "🔸");
+	}
+
+	#[test]
+	fn maps_workflow_subagent_to_puzzle() {
+		assert_eq!(get_agent_icon("workflow-subagent"), "🧩");
 	}
 }

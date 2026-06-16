@@ -5,7 +5,7 @@
 //! mtime プレソートでセッション一覧を構築する 4-phase ロード。
 
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -212,55 +212,54 @@ impl FileSystemSessionRepository {
 	///    後方互換経路 (旧バージョン向け)
 	/// 3. どちらも引けなければ `"unknown"`
 	pub fn get_sub_agents(&self, session: &SessionEntity, show_all: bool) -> Vec<AgentEntity> {
-		let Ok(entries) = fs::read_dir(&session.subagents_dir) else {
-			return Vec::new();
-		};
-
-		let mut files: Vec<(String, PathBuf)> = Vec::new();
-		for entry in entries.flatten() {
-			let name = match entry.file_name().into_string() {
-				Ok(s) => s,
-				Err(_) => continue,
-			};
-			if !name.starts_with("agent-") || !name.ends_with(".jsonl") {
-				continue;
-			}
-			files.push((name, entry.path()));
-		}
-		if files.is_empty() {
+		let refs = collect_agent_file_refs(&session.subagents_dir);
+		if refs.is_empty() {
 			return Vec::new();
 		}
 
-		// meta.json で解決できなかった agent だけ mapper に任せる (旧ログ互換)。
+		// meta.json で解決できなかった通常 agent だけ mapper に任せる (旧ログ互換)。
 		// 未解決が無ければ mapper 構築自体スキップできるので、ここでは lazy にする
 		let mut needs_mapper_fallback = false;
-		let mut agents: Vec<AgentEntity> = Vec::with_capacity(files.len());
-		for (name, path) in &files {
-			let Ok(meta) = fs::metadata(path) else {
+		let mut agents: Vec<AgentEntity> = Vec::with_capacity(refs.len());
+		for r in &refs {
+			let Ok(meta) = fs::metadata(&r.jsonl_path) else {
 				continue;
 			};
-			let agent_id = name
-				.trim_start_matches("agent-")
-				.trim_end_matches(".jsonl")
-				.to_string();
-			let sidecar_type = read_meta_sidecar_agent_type(&session.subagents_dir, &agent_id);
+			// サイドカーは各 agent の自ディレクトリ基準で解決する
+			// (workflow agent は subagents/workflows/<run>/ が自ディレクトリ)
+			let sidecar_type = read_meta_sidecar_agent_type(&r.meta_dir, &r.agent_id);
 			let agent_type = match sidecar_type {
 				Some(t) => t,
+				None if r.workflow_run.is_some() => {
+					// workflow agent はサイドカーが権威ソース。欠落時は generic 既定に
+					// する (mapper はメインログ基準で workflow agent を知らない)
+					WORKFLOW_SUBAGENT_TYPE.to_string()
+				}
 				None => {
 					needs_mapper_fallback = true;
 					String::new() // 後でまとめて埋める
 				}
 			};
+			// generic な workflow-subagent だけ prompt 先頭からロール label を導出する
+			// (カスタム型は型名がそのまま label になるので不要)
+			let workflow_label = if r.workflow_run.is_some() && agent_type == WORKFLOW_SUBAGENT_TYPE
+			{
+				read_first_prompt_head(&r.jsonl_path).and_then(|h| derive_workflow_label(&h))
+			} else {
+				None
+			};
 			agents.push(AgentEntity {
-				agent_id,
+				agent_id: r.agent_id.clone(),
 				agent_type,
-				output_path: path.clone(),
+				output_path: r.jsonl_path.clone(),
 				updated_at: systemtime_to_utc(meta.modified().ok()),
+				workflow_run: r.workflow_run.clone(),
+				workflow_label,
 			});
 		}
 
 		if needs_mapper_fallback {
-			let mapper = build_agent_mapper(&session.file_path, files.len()).ok();
+			let mapper = build_agent_mapper(&session.file_path, refs.len()).ok();
 			for a in agents.iter_mut() {
 				if !a.agent_type.is_empty() {
 					continue;
@@ -442,32 +441,161 @@ fn get_session_metadata(path: &Path, file_size: u64) -> SessionMetadata {
 }
 
 /// `subagents_dir` 配下の `agent-*.jsonl` ファイル数を数える。
+/// `subagents/workflows/<wf_runId>/agent-*.jsonl` (Workflow ツール経由) も含む。
 /// `show_all=false` のときは `HIDDEN_AGENT_PREFIXES` にマッチする `agent_id` を除く。
 /// ディレクトリが存在しない / 読めない場合は 0 を返す。
 fn count_subagents(subagents_dir: &Path, show_all: bool) -> usize {
-	let Ok(entries) = fs::read_dir(subagents_dir) else {
-		return 0;
-	};
-	let mut count = 0;
-	for entry in entries.flatten() {
-		let Ok(name) = entry.file_name().into_string() else {
-			continue;
-		};
-		if !name.starts_with("agent-") || !name.ends_with(".jsonl") {
-			continue;
-		}
-		if !show_all {
-			let agent_id = name.trim_start_matches("agent-").trim_end_matches(".jsonl");
-			if HIDDEN_AGENT_PREFIXES
-				.iter()
-				.any(|p| agent_id.starts_with(p))
-			{
+	collect_agent_file_refs(subagents_dir)
+		.into_iter()
+		.filter(|r| show_all || !is_hidden_agent_id(&r.agent_id))
+		.count()
+}
+
+const WORKFLOW_SUBAGENT_TYPE: &str = "workflow-subagent";
+
+/// workflow agent のロール label の最大表示文字数 (超過分は `…` で省略)。
+const WORKFLOW_LABEL_MAX_CHARS: usize = 30;
+
+/// `agent_id` が非表示プレフィックス (`HIDDEN_AGENT_PREFIXES`) のいずれかで
+/// 始まるか。
+fn is_hidden_agent_id(agent_id: &str) -> bool {
+	HIDDEN_AGENT_PREFIXES
+		.iter()
+		.any(|p| agent_id.starts_with(p))
+}
+
+/// 検出した agent ログ 1 件の参照情報。
+struct AgentFileRef {
+	agent_id: String,
+	jsonl_path: PathBuf,
+	/// `agent-<id>.meta.json` を探すディレクトリ (agent の自ディレクトリ)。
+	meta_dir: PathBuf,
+	/// Workflow ツール経由なら run id (`wf_` プレフィックス除去済み)。通常は None。
+	workflow_run: Option<String>,
+}
+
+/// `subagents/` 直下の `agent-*.jsonl` と、Workflow ツール経由の
+/// `subagents/workflows/<wf_runId>/agent-*.jsonl` を 1 階層 walk して集める。
+fn collect_agent_file_refs(subagents_dir: &Path) -> Vec<AgentFileRef> {
+	let mut refs = Vec::new();
+
+	// 通常のフラットなサブエージェント
+	if let Ok(entries) = fs::read_dir(subagents_dir) {
+		for entry in entries.flatten() {
+			let Ok(name) = entry.file_name().into_string() else {
 				continue;
+			};
+			if let Some(agent_id) = agent_id_from_jsonl(&name) {
+				refs.push(AgentFileRef {
+					agent_id,
+					jsonl_path: entry.path(),
+					meta_dir: subagents_dir.to_path_buf(),
+					workflow_run: None,
+				});
 			}
 		}
-		count += 1;
 	}
-	count
+
+	// Workflow ツール経由の agent は 1 階層深い workflows/<wf_runId>/ に出る
+	let workflows_dir = subagents_dir.join("workflows");
+	if let Ok(runs) = fs::read_dir(&workflows_dir) {
+		for run in runs.flatten() {
+			let run_path = run.path();
+			if !run_path.is_dir() {
+				continue;
+			}
+			let Ok(run_name) = run.file_name().into_string() else {
+				continue;
+			};
+			let run_id = run_name
+				.strip_prefix("wf_")
+				.unwrap_or(&run_name)
+				.to_string();
+			let Ok(files) = fs::read_dir(&run_path) else {
+				continue;
+			};
+			for f in files.flatten() {
+				let Ok(name) = f.file_name().into_string() else {
+					continue;
+				};
+				if let Some(agent_id) = agent_id_from_jsonl(&name) {
+					refs.push(AgentFileRef {
+						agent_id,
+						jsonl_path: f.path(),
+						meta_dir: run_path.clone(),
+						workflow_run: Some(run_id.clone()),
+					});
+				}
+			}
+		}
+	}
+
+	refs
+}
+
+/// `agent-<id>.jsonl` 形式のファイル名から `<id>` を取り出す。
+/// `.meta.json` 等はマッチしない。
+fn agent_id_from_jsonl(file_name: &str) -> Option<String> {
+	if !file_name.starts_with("agent-") || !file_name.ends_with(".jsonl") {
+		return None;
+	}
+	Some(
+		file_name
+			.trim_start_matches("agent-")
+			.trim_end_matches(".jsonl")
+			.to_string(),
+	)
+}
+
+/// jsonl の最初の非空行を読み、`message.content` のテキストを返す
+/// (workflow agent のロール label 導出用)。先頭行だけ読むので軽量。
+fn read_first_prompt_head(jsonl_path: &Path) -> Option<String> {
+	let file = File::open(jsonl_path).ok()?;
+	let mut reader = BufReader::new(file);
+	let mut line = String::new();
+	loop {
+		line.clear();
+		if reader.read_line(&mut line).ok()? == 0 {
+			return None;
+		}
+		if !line.trim().is_empty() {
+			break;
+		}
+	}
+	let value: Value = serde_json::from_str(line.trim()).ok()?;
+	let content = value.get("message")?.get("content")?;
+	match content {
+		Value::String(s) => Some(s.clone()),
+		Value::Array(items) => items
+			.iter()
+			.find_map(|item| item.get("text").and_then(Value::as_str))
+			.map(str::to_string),
+		_ => None,
+	}
+}
+
+/// workflow agent の先頭 prompt から短いロール label を導出する。
+///
+/// `agent()` に渡される人間可読 label は Claude Code 側で永続化されないため、
+/// prompt 冒頭の「あなたは ○○ です」相当を切り出して代替する。導出できない
+/// (空など) 場合は `None`。
+fn derive_workflow_label(prompt_head: &str) -> Option<String> {
+	let trimmed = prompt_head.trim_start();
+	let body = trimmed.strip_prefix("あなたは").unwrap_or(trimmed);
+	// 最初の文 / 節の区切りまでを label とする
+	let end = body.find(['。', '（', '(', '\n']).unwrap_or(body.len());
+	let label = body[..end].trim();
+	// 末尾の丁寧表現「です」は label としては冗長なので落とす
+	let label = label.strip_suffix("です").unwrap_or(label).trim_end();
+	if label.is_empty() {
+		return None;
+	}
+	if label.chars().count() > WORKFLOW_LABEL_MAX_CHARS {
+		let mut truncated: String = label.chars().take(WORKFLOW_LABEL_MAX_CHARS).collect();
+		truncated.push('…');
+		return Some(truncated);
+	}
+	Some(label.to_string())
 }
 
 fn read_partial(path: &Path, offset: u64, len: u64) -> Option<String> {
@@ -506,8 +634,8 @@ fn collapse_whitespace(s: &str) -> String {
 /// Claude Code は各サブエージェント jsonl の隣に
 /// `{ "agentType": "general-purpose", "description"?: "..." }` 形式の
 /// サイドカーを書く。これが現行の権威あるマッピング情報。
-fn read_meta_sidecar_agent_type(subagents_dir: &Path, agent_id: &str) -> Option<String> {
-	let meta_path = subagents_dir.join(format!("agent-{agent_id}.meta.json"));
+fn read_meta_sidecar_agent_type(agent_dir: &Path, agent_id: &str) -> Option<String> {
+	let meta_path = agent_dir.join(format!("agent-{agent_id}.meta.json"));
 	let content = fs::read_to_string(&meta_path).ok()?;
 	let value: Value = serde_json::from_str(&content).ok()?;
 	let t = value.get("agentType").and_then(Value::as_str)?;
@@ -1105,5 +1233,153 @@ mod tests {
 		assert_eq!(agents[0].agent_type, "Explore");
 		assert_eq!(agents[1].agent_id, "modern1");
 		assert_eq!(agents[1].agent_type, "general-purpose");
+	}
+
+	/// Workflow ツール経由の agent は `subagents/workflows/<wf_runId>/` に
+	/// 1 階層深く置かれる。通常の `subagents/` 直下 agent と同じフラットな
+	/// リストに統合し、`workflow_run` / `workflow_label` を立てる。
+	#[test]
+	fn get_sub_agents_discovers_workflow_agents() {
+		let root = tempdir().unwrap();
+		let subagents_dir = root.path().join("sess").join("subagents");
+		create_dir_all(&subagents_dir).unwrap();
+
+		// 通常のフラット agent
+		write_file(
+			&subagents_dir.join("agent-flat1.jsonl"),
+			"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n",
+		);
+		write_file(
+			&subagents_dir.join("agent-flat1.meta.json"),
+			r#"{"agentType":"Explore"}"#,
+		);
+
+		// Workflow run ディレクトリ
+		let wf_dir = subagents_dir.join("workflows").join("wf_run123");
+		create_dir_all(&wf_dir).unwrap();
+		// generic な workflow-subagent (label は prompt 先頭から導出する)
+		write_file(
+			&wf_dir.join("agent-wfa.jsonl"),
+			"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"あなたは code-review の finder です（角度: simplification）。recall 重視\"}}\n",
+		);
+		write_file(
+			&wf_dir.join("agent-wfa.meta.json"),
+			r#"{"agentType":"workflow-subagent"}"#,
+		);
+		// カスタム型 (型名がそのまま label になるので workflow_label は None)
+		write_file(
+			&wf_dir.join("agent-wfb.jsonl"),
+			"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"レビューして\"}}\n",
+		);
+		write_file(
+			&wf_dir.join("agent-wfb.meta.json"),
+			r#"{"agentType":"consistency-reviewer"}"#,
+		);
+
+		let session = SessionEntity {
+			session_id: "sess".to_string(),
+			workspace: "ws".to_string(),
+			file_path: root.path().join("sess.jsonl"),
+			updated_at: Utc::now(),
+			subagents_dir,
+			subagent_count: 0,
+			metadata: SessionMetadata::default(),
+		};
+
+		let repo = FileSystemSessionRepository::new();
+		let mut agents = repo.get_sub_agents(&session, false);
+		agents.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+		assert_eq!(agents.len(), 3, "フラット 1 + workflow 2 = 3");
+
+		let flat = &agents[0];
+		assert_eq!(flat.agent_id, "flat1");
+		assert_eq!(flat.agent_type, "Explore");
+		assert_eq!(flat.workflow_run, None, "通常 agent は workflow_run なし");
+
+		let wfa = &agents[1];
+		assert_eq!(wfa.agent_id, "wfa");
+		assert_eq!(wfa.agent_type, "workflow-subagent");
+		assert_eq!(
+			wfa.workflow_run.as_deref(),
+			Some("run123"),
+			"wf_ プレフィックスを除いた run id"
+		);
+		assert_eq!(
+			wfa.workflow_label.as_deref(),
+			Some("code-review の finder"),
+			"generic な workflow-subagent は prompt 先頭からロールを導出"
+		);
+		// output_path は nested の実体を指す (attach 経路で使う)
+		assert!(wfa
+			.output_path
+			.ends_with("workflows/wf_run123/agent-wfa.jsonl"));
+
+		let wfb = &agents[2];
+		assert_eq!(wfb.agent_id, "wfb");
+		assert_eq!(wfb.agent_type, "consistency-reviewer");
+		assert_eq!(wfb.workflow_run.as_deref(), Some("run123"));
+		assert_eq!(
+			wfb.workflow_label, None,
+			"カスタム型は型名が label になるので導出しない"
+		);
+	}
+
+	/// セッション一覧の `[ N ]` カウントにも workflow agent を含める。
+	#[test]
+	fn count_subagents_includes_workflow_agents() {
+		let root = tempdir().unwrap();
+		let subagents_dir = root.path().join("subagents");
+		create_dir_all(&subagents_dir).unwrap();
+		write_file(&subagents_dir.join("agent-flat1.jsonl"), "{}\n");
+		let wf_dir = subagents_dir.join("workflows").join("wf_r1");
+		create_dir_all(&wf_dir).unwrap();
+		write_file(&wf_dir.join("agent-w1.jsonl"), "{}\n");
+		write_file(&wf_dir.join("agent-w2.jsonl"), "{}\n");
+		write_file(&wf_dir.join("agent-w1.meta.json"), "{}");
+		write_file(&wf_dir.join("journal.jsonl"), "{}\n");
+
+		assert_eq!(
+			count_subagents(&subagents_dir, false),
+			3,
+			"フラット 1 + workflow 2、journal.jsonl は除外"
+		);
+	}
+
+	#[test]
+	fn derive_workflow_label_strips_prefix_and_polite_suffix() {
+		assert_eq!(
+			derive_workflow_label(
+				"あなたは code-review の finder です（角度: simplification）。recall 重視"
+			)
+			.as_deref(),
+			Some("code-review の finder")
+		);
+		assert_eq!(
+			derive_workflow_label("あなたは実装プランナーです。以下のタスクについて…").as_deref(),
+			Some("実装プランナー")
+		);
+	}
+
+	#[test]
+	fn derive_workflow_label_cuts_at_first_newline() {
+		assert_eq!(
+			derive_workflow_label("あなたは Bash 実行係\n詳細は以下").as_deref(),
+			Some("Bash 実行係")
+		);
+	}
+
+	#[test]
+	fn derive_workflow_label_truncates_long_head() {
+		let long = "WORKDIR=/Users/foo/bar/baz/qux/corge/grault/garply/waldo/fred/plugh";
+		let label = derive_workflow_label(long).unwrap();
+		assert!(label.ends_with('…'), "上限超過は … で省略: {label}");
+		assert_eq!(label.chars().count(), WORKFLOW_LABEL_MAX_CHARS + 1);
+	}
+
+	#[test]
+	fn derive_workflow_label_returns_none_for_empty() {
+		assert_eq!(derive_workflow_label(""), None);
+		assert_eq!(derive_workflow_label("   \n  "), None);
+		assert_eq!(derive_workflow_label("あなたは"), None);
 	}
 }

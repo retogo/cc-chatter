@@ -51,7 +51,12 @@ fn render_list(f: &mut Frame, area: Rect, app: &App) {
 		.agents
 		.iter()
 		.map(|a| {
-			let icon = get_agent_icon(&a.agent_type);
+			// Workflow ツール経由の agent は agentType に関わらず 🧩 で区別する
+			let icon = if a.workflow_run.is_some() {
+				"🧩"
+			} else {
+				get_agent_icon(&a.agent_type)
+			};
 			let updated = format_date_time(&a.updated_at, "%H:%M:%S");
 			let checked = app.view.selected_agent_ids.contains(&a.agent_id);
 			let checkbox_str = if checked { "[x] " } else { "[ ] " };
@@ -62,15 +67,34 @@ fn render_list(f: &mut Frame, area: Rect, app: &App) {
 			} else {
 				Style::default().fg(Color::DarkGray)
 			};
-			ListItem::new(Line::from(vec![
+			// 型カラム: generic な workflow-subagent は導出ロール label を優先表示する
+			let label = a.workflow_label.as_deref().unwrap_or(&a.agent_type);
+
+			let mut spans = vec![
 				Span::styled(checkbox_str, checkbox_style),
 				Span::raw(format!("{icon}  ")),
-				Span::styled(a.agent_type.clone(), Style::default().fg(Color::Cyan)),
-				Span::raw("  "),
-				Span::styled(a.agent_id.clone(), Style::default().fg(Color::Gray)),
-				Span::raw("  "),
-				Span::styled(updated, Style::default().fg(Color::DarkGray)),
-			]))
+			];
+			// Workflow ツール経由なら行頭に run マーカーを付ける
+			if let Some(run) = &a.workflow_run {
+				let run_short: String = run.chars().take(8).collect();
+				spans.push(Span::styled(
+					format!("wf:{run_short} "),
+					Style::default().fg(Color::DarkGray),
+				));
+			}
+			spans.push(Span::styled(
+				label.to_string(),
+				Style::default().fg(Color::Cyan),
+			));
+			spans.push(Span::raw("  "));
+			spans.push(Span::styled(
+				a.agent_id.clone(),
+				Style::default().fg(Color::Gray),
+			));
+			spans.push(Span::raw("  "));
+			spans.push(Span::styled(updated, Style::default().fg(Color::DarkGray)));
+
+			ListItem::new(Line::from(spans))
 		})
 		.collect();
 
